@@ -1,1 +1,1 @@
-# Binance-Trading-Bot
+# KuCoin-Trading-Bot
