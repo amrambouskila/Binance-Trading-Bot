@@ -1,6 +1,6 @@
 import pandas as pd
 import multiprocessing as mp
-from database import Database
+from database import *
 from logger import create_logger
 import plotly.graph_objects as go
 
@@ -79,3 +79,4 @@ def create_candlestick_chart(df):
 if __name__ == '__main__':
     ticker_dict = build_candlesticks(start_date='2024-05-11', debug=True)
     create_candlestick_chart(pd.DataFrame(ticker_dict['BTC-USDT']['data']))
+    add_new_data(ticker='BTC-USDT', start_date='2024-05-08-00-00', end_date='2024-05-12-00-00')

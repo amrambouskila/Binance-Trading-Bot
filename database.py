@@ -256,14 +256,16 @@ class Database(object):
         for ticker in tickers:
             self.create_table(ticker=ticker, logger=logger)
 
-        ticker_dict = cbpro_to_sql(tickers=tickers, start_date=start_date, end_date=end_date, cores=cores, logger=logger)
+        ticker_dict = cbpro_to_sql(tickers=tickers, start_date=start_date, end_date=end_date, cores=cores,
+                                   logger=logger)
         return ticker_dict
 
 
-def cbpro_get(ticker: str, day: str, shared_dict: dict, logger: logging.Logger):
-    shared_dict['cbpro'] = True
-    try:
+def cbpro_get(ticker: str, day: str, shared_dict: dict = None, logger: logging.Logger = None):
+    if shared_dict:
+        shared_dict['cbpro'] = True
 
+    try:
         try:
             data = HistoricalData(
                 ticker=ticker,
@@ -278,8 +280,11 @@ def cbpro_get(ticker: str, day: str, shared_dict: dict, logger: logging.Logger):
             time.sleep(60)
             data = cbpro_get(ticker=ticker, day=day, shared_dict=shared_dict, logger=logger)
 
-        shared_dict['cbpro'] = False
+        if shared_dict:
+            shared_dict['cbpro'] = False
+
         return data
+
     except BaseException as e:
         raise ValueError(f'Financial Modeling Prep does not have {ticker} data from {day} - {e}')
 
@@ -304,8 +309,16 @@ def insert_new_data(ticker, data, logger: logging.Logger):
     )
 
     data = data.drop_duplicates(subset=['Time_Stamp'], keep='last')
+    data.reset_index(inplace=True, drop=True)
 
-    # Check if 'Time_Stamp' is already the index, if not, set it as the index
+    db_data = Database.speed_read(
+        f'SELECT "Time_Stamp", "Date", "Time", "Open", "High", "Low", "Close", "Volume" FROM "Candlesticks"."{ticker}"'
+    )
+
+    for i in range(data.shape[0]):
+        if data.loc[i, 'Time_Stamp'] in list(db_data['Time_Stamp'].values):
+            data.drop(i, axis=0, inplace=True)
+
     if 'Time_Stamp' != [*data.index.names][0]:
         data.set_index('Time_Stamp', inplace=True)
 
@@ -314,6 +327,48 @@ def insert_new_data(ticker, data, logger: logging.Logger):
 
     data.to_sql(con=engine, schema=settings.candlesticks_schema, name=ticker, if_exists='append')
     return True
+
+
+def add_new_data(ticker: str, start_date: str, end_date: str, logger: logging.Logger = None, counter: int = 0):
+    if counter == 10:
+        raise ValueError('data could not be added for some reason')
+
+    df = HistoricalData(
+        ticker=ticker,
+        granularity=60,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=False
+    ).retrieve_data()
+
+    if [*df.columns] == ['low', 'high', 'open', 'close', 'volume']:
+        df.reset_index(inplace=True)
+        df.rename(
+            columns={
+                'low': 'Low',
+                'high': 'High',
+                'open': 'Open',
+                'close': 'Close',
+                'volume': 'Volume',
+                'time': 'Time_Stamp'
+            },
+            inplace=True
+        )
+
+        df = df[['Open', 'High', 'Close', 'Low', 'Volume', 'Time_Stamp']]
+        df['Time_Stamp'] = pd.to_datetime(df['Time_Stamp'])
+        df['Date'] = df['Time_Stamp'].apply(lambda time_stamp: time_stamp.strftime('%Y-%m-%d'))
+        df['Time'] = df['Time_Stamp'].apply(lambda time_stamp: time_stamp.strftime('%H:%M:%S'))
+        df['Time'] = pd.to_datetime(df['Time'])
+        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = df['Date'].apply(lambda time_stamp: time_stamp.strftime('%Y-%m-%d'))
+        df['Time'] = df['Time'].apply(lambda time_stamp: time_stamp.strftime('%H:%M:%S'))
+        df.reset_index(inplace=True, drop=True)
+    else:
+        add_new_data(ticker=ticker, start_date=start_date, end_date=end_date, logger=logger, counter=counter+1)
+
+    insert_new_data(ticker=ticker, data=df, logger=logger)
+    fill_in_missing_rows(ticker=ticker, core=1, logger=logger)
 
 
 def fill_in_missing_rows(ticker: str, core: int, logger: logging.Logger):
@@ -367,16 +422,18 @@ def fill_in_missing_rows(ticker: str, core: int, logger: logging.Logger):
             if df.loc[i, 'Time_Stamp'] in list(data['Time_Stamp'].values):
                 df.drop(i, axis=0, inplace=True)
 
-        df.set_index('Time_Stamp').to_sql(con=engine, schema=settings.candlesticks_schema, name=ticker, if_exists='append')
+        df.set_index('Time_Stamp').to_sql(con=engine, schema=settings.candlesticks_schema, name=ticker,
+                                          if_exists='append')
 
-        logger.info(
-            f'{mp.current_process().name}: {ticker} took {time.time() - ticker_time} seconds to fill in {df.shape[0]} rows'
-        )
+        if logger:
+            logger.info(
+                f'{mp.current_process().name}: {ticker} took {time.time() - ticker_time} seconds to fill in {df.shape[0]} rows'
+            )
 
         data = Database.speed_read(
             f'SELECT "Time_Stamp", "Date", "Time", "Open", "High", "Low", "Close", "Volume" FROM "Candlesticks"."{ticker}"'
         )
-        
+
         missing_minutes = pd.date_range(start=data['Time_Stamp'].min(), end=data['Time_Stamp'].max(),
                                         freq='T').difference(data['Time_Stamp']).size
 
@@ -546,5 +603,6 @@ def cbpro_to_sql(tickers: list, start_date: str, end_date: str, cores: int, logg
             {col: [*shared_dict[ticker]['data'][col].values()] for col in shared_dict[ticker]['data'].keys()})
         ticker_dict[ticker] = {'days': [day for day in shared_dict[ticker]['days']], 'data': ticker_df}
 
-    logger.info(f'{pd.Timedelta(pd.Timestamp(stop_ts.strftime("%Y-%m-%d")) - pd.Timestamp(start_date)).days} Days of {tickers} took {time.time() - ticker_time} seconds to upload to SQL')
+    logger.info(
+        f'{pd.Timedelta(pd.Timestamp(stop_ts.strftime("%Y-%m-%d")) - pd.Timestamp(start_date)).days} Days of {tickers} took {time.time() - ticker_time} seconds to upload to SQL')
     return ticker_dict
