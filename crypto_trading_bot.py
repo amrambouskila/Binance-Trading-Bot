@@ -80,3 +80,4 @@ if __name__ == '__main__':
     ticker_dict = build_candlesticks(start_date='2024-05-11', debug=True)
     create_candlestick_chart(pd.DataFrame(ticker_dict['BTC-USDT']['data']))
     add_new_data(ticker='BTC-USDT', start_date='2024-05-08-00-00', end_date='2024-05-12-00-00')
+    # live_btc = LiveCryptoData('BTC-USDT').return_data()
